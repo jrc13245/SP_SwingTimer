@@ -158,16 +158,11 @@ end
 
 -- This function is realy useful
 local function has_value (tab, val)
-    for value in ipairs(tab) do
+    for _, value in ipairs(tab) do
         if value == val then
             return true
         end
     end
-
-    if (tab[val] ~= nil) then
-        return true
-    end
-
     return false
 end
 
