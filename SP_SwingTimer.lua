@@ -744,15 +744,28 @@ function GetFlurry(class)
 	-- default multiplier
 	flurry_mult = 1.3
 
+	-- Defensive check 1: Exit if the class isn't in our data table.
+	if not flurry[class] then
+		return
+	end
+
 	for page = 1, 3 do
 		for talent = 1, 100 do
 			local name, _, _, _, count = GetTalentInfo(page, talent)
 			if not name then break end
 			if name == "Flurry" then
-				if count == 0 then
+				-- Defensive check 2: If count is nil or 0, there is no bonus.
+				if not count or count == 0 then
 					flurry_mult = 1
 				else
-					flurry_mult = 1 + (flurry[class][count] or 0) / 100
+					-- Only proceed if count is a valid number (1-5).
+					-- Check if the value exists before using it.
+					if flurry[class][count] then
+						flurry_mult = 1 + (flurry[class][count] / 100)
+					else
+						-- Fallback if count is an unexpected number (e.g., > 5)
+						flurry_mult = 1
+					end
 				end
 				return
 			end
