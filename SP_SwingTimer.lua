@@ -1,5 +1,5 @@
 
-local version = "6.1.0"
+local version = "6.3.0"
 
 local defaults = {
 	x = 0,
@@ -16,9 +16,15 @@ local defaults = {
 	bg = 1,
 	timers = 1,
 	style = 2,
+	colorBar = "1,1,1",
+	colorTimer = "0,0,0",
+	timerPostitionX = 0,
 	show_oh = true,
 	show_range = true,
 	show_hs = true,
+	show_dist = false,
+	lag = 0,        -- manual latency offset in ms (0 = auto if available)
+	autolag = true, -- auto-estimate latency using spell timing
 }
 
 local default_bg1 = nil
@@ -40,6 +46,9 @@ local settings = {
 	timers = "Show weapon timers (1 = show, 0 = hide)",
 	style = "Choose 1, 2, 3, 4, 5 or 6",
 	move = "Enable bars movement",
+	colorBar = "Bar color (R,G,B). Number range is 0-1.",
+	colorTimer = "Bar color (R,G,B). Number range is 0-1.",
+	timerPostitionX = "No idea"
 }
 
 local flurry = {
@@ -74,27 +83,57 @@ for index in combatStrings do
 	end
 end
 --------------------------------------------------------------------------------
-local weapon = nil
-local offhand = nil
-local range = nil
-local combat = false
-local configmod = false;
-local player_guid = nil
-local player_class = nil
-local flurry_mult = 0
-local paused_swing = nil
-local paused_swingOH = nil
+-- Consolidate state into a table to avoid Lua 5.0 upvalue limit (32 max)
+local S = {
+	weapon = nil,
+	offhand = nil,
+	range = nil,
+	combat = false,
+	configmod = false,
+	player_guid = nil,
+	player_class = nil,
+	flurry_mult = 1,
+	range_fader = 0,
+	ele_flurry_fresh = nil,
+	flurry_fresh = nil,
+	flurry_count = -1,
+	wf_swings = 0,
+	-- Nampower on-swing spell tracking
+	queued_onswing_spell = nil,
+	-- Latency estimation
+	estimated_lag = 0,
+	lag_samples = {},
+	timer_zero_time = nil,
+	timer_zero_timeOH = nil,
+	-- Nampower spell cast timing
+	pending_cast_time = nil,
+	pending_cast_spell = nil,
+}
+local LAG_SAMPLE_COUNT = 5
+
+-- Feature detection - deferred to avoid crashes during load
+local has_nampower = false
+local has_unitxp = false
+
+local function DetectFeatures()
+	-- Safely detect Nampower
+	if GetCurrentCastingInfo then
+		has_nampower = true
+	end
+	-- Safely detect UnitXP
+	if UnitXP then
+		local ok = pcall(UnitXP, "nop", "nop")
+		has_unitxp = ok
+	end
+end
+
+-- Timers need to be global for external access
 st_timer = 0
 st_timerMax = 1
 st_timerOff = 0
 st_timerOffMax = 1
 st_timerRange = 0
 st_timerRangeMax = 1
-local range_fader = 0
-local ele_flurry_fresh = nil
-local flurry_fresh = nil
-local flurry_count = -1
-local wf_swings = 0
 
 --------------------------------------------------------------------------------
 local loc = {};
@@ -168,7 +207,7 @@ end
 
 -- This function is realy useful
 local function has_value (tab, val)
-    for value in ipairs(tab) do
+    for _, value in ipairs(tab) do
         if value == val then
             return true
         end
@@ -186,6 +225,40 @@ local function sp_round(number, decimals)
     return math.floor(number * power) / power
 end
 
+-- Get current latency offset in seconds
+local function GetLagOffset()
+	-- Manual override takes priority
+	if SP_ST_GS and SP_ST_GS["lag"] and SP_ST_GS["lag"] > 0 then
+		return SP_ST_GS["lag"] / 1000
+	end
+	-- Use auto-estimated latency if enabled
+	if SP_ST_GS and SP_ST_GS["autolag"] and S.estimated_lag > 0 then
+		return S.estimated_lag
+	end
+	return 0
+end
+
+-- Add a latency sample and update the rolling average
+local function AddLagSample(round_trip_time)
+	-- One-way latency is roughly half of round-trip
+	local one_way = round_trip_time / 2
+
+	-- Add to samples
+	table.insert(S.lag_samples, one_way)
+
+	-- Keep only the last N samples
+	while getn(S.lag_samples) > LAG_SAMPLE_COUNT do
+		table.remove(S.lag_samples, 1)
+	end
+
+	-- Calculate average
+	local sum = 0
+	for _, sample in ipairs(S.lag_samples) do
+		sum = sum + sample
+	end
+	S.estimated_lag = sum / getn(S.lag_samples)
+end
+
 --------------------------------------------------------------------------------
 
 local function UpdateSettings()
@@ -198,6 +271,9 @@ local function UpdateSettings()
 end
 
 --------------------------------------------------------------------------------
+
+local HeroicTrackedActionSlots = {}
+local CleaveTrackedActionSlots = {}
 
 local function UpdateHeroicStrike()
 	local _, class = UnitClass("player")
@@ -254,6 +330,12 @@ end
 --------------------------------------------------------------------------------
 
 local function HeroicStrikeQueued()
+	-- Use Nampower's on-swing tracking if available
+	if has_nampower and S.queued_onswing_spell then
+		local name = SpellInfo(S.queued_onswing_spell)
+		return name == "Heroic Strike" or name == L['combatSpells']['HS']
+	end
+	-- Fallback to action bar scanning
 	if not HeroicTrackedActionSlots or getn(HeroicTrackedActionSlots) == 0 then
 		return nil
 	end
@@ -268,6 +350,12 @@ end
 ------------------------------------------------------------------------------------
 
 local function CleaveQueued()
+	-- Use Nampower's on-swing tracking if available
+	if has_nampower and S.queued_onswing_spell then
+		local name = SpellInfo(S.queued_onswing_spell)
+		return name == "Cleave" or name == L['combatSpells']['Cleave']
+	end
+	-- Fallback to action bar scanning
 	if not CleaveTrackedActionSlots or getn(CleaveTrackedActionSlots) == 0 then
 		return nil
 	end
@@ -277,6 +365,18 @@ local function CleaveQueued()
 		end
 	end
 	return false
+end
+
+-- Nampower SPELL_QUEUE_EVENT handler
+local ON_SWING_QUEUED = 0
+local ON_SWING_QUEUE_POPPED = 1
+
+local function OnSpellQueueEvent(eventCode, spellId)
+	if eventCode == ON_SWING_QUEUED then
+		S.queued_onswing_spell = spellId
+	elseif eventCode == ON_SWING_QUEUE_POPPED then
+		S.queued_onswing_spell = nil
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -302,21 +402,28 @@ local function UpdateAppearance()
 	SP_ST_FrameRange:ClearAllPoints()
 	
 	SP_ST_Frame:SetPoint("TOPLEFT", SP_ST_GS["x"], SP_ST_GS["y"])
-	SP_ST_maintimer:SetPoint("RIGHT", "SP_ST_Frame", "RIGHT", -2, 0)
+	SP_ST_maintimer:SetPoint("RIGHT", "SP_ST_Frame", "CENTER", 7, 0)
 	SP_ST_maintimer:SetFont("Fonts\\FRIZQT__.TTF", SP_ST_GS["h"])
-	SP_ST_maintimer:SetTextColor(1,1,1,1);
+
 	if (SP_ST_GS["bg"] ~= 0) then SP_ST_Frame:SetBackdrop(default_bg1) else SP_ST_Frame:SetBackdrop(nil) end
 
-	SP_ST_FrameOFF:SetPoint("TOPLEFT", "SP_ST_Frame", "BOTTOMLEFT", SP_ST_GS["ho"], SP_ST_GS["vo"]);
-	SP_ST_offtimer:SetPoint("RIGHT", "SP_ST_FrameOFF", "RIGHT", -2, 0)
 	SP_ST_offtimer:SetFont("Fonts\\FRIZQT__.TTF", SP_ST_GS["h"])
-	SP_ST_offtimer:SetTextColor(1,1,1,1);
+
 	if (SP_ST_GS["bg"] ~= 0) then SP_ST_FrameOFF:SetBackdrop(default_bg2) else SP_ST_FrameOFF:SetBackdrop(nil) end
 
+-- Set timer text color from settings
+	local _, _, r, g, b = string.find(SP_ST_GS["colorTimer"] or "0,0,0", "([%d%.]+),([%d%.]+),([%d%.]+)")
+	r, g, b = tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0
+	SP_ST_maintimer:SetTextColor(r, g, b, 1)
+	SP_ST_offtimer:SetTextColor(r, g, b, 1)
+
+	SP_ST_FrameOFF:SetPoint("TOPLEFT", "SP_ST_Frame", "BOTTOMLEFT", 0, 0);
+	SP_ST_offtimer:SetPoint("RIGHT", "SP_ST_FrameOFF", "CENTER", 7, 0)
 	SP_ST_FrameRange:SetPoint("TOPLEFT", "SP_ST_FrameOFF", "BOTTOMLEFT", SP_ST_GS["ho"], SP_ST_GS["vo"]);
 	SP_ST_rangetimer:SetPoint("RIGHT", "SP_ST_FrameRange", "RIGHT", -2, 0)
 	SP_ST_rangetimer:SetFont("Fonts\\FRIZQT__.TTF", SP_ST_GS["h"])
-	SP_ST_rangetimer:SetTextColor(1,1,1,1);
+	SP_ST_rangetimer:SetTextColor(r, g, b, 1)
+
 	if (SP_ST_GS["bg"] ~= 0) then SP_ST_FrameRange:SetBackdrop(default_bg3) else SP_ST_FrameRange:SetBackdrop(nil) end
 
 	if (SP_ST_GS["icons"] ~= 0) then
@@ -446,12 +553,12 @@ local function ClosestSwing()
 end
 
 local function UpdateWeapon()
-	weapon = GetInventoryItemLink("player", GetInventorySlotInfo("MainHandSlot"))
+	S.weapon = GetInventoryItemLink("player", GetInventorySlotInfo("MainHandSlot"))
 	if (SP_ST_GS["icons"] ~= 0) then
 		SP_ST_mainhand:SetTexture(GetInventoryItemTexture("player", GetInventorySlotInfo("MainHandSlot")));
 	end
 	if (isDualWield()) then
-		offhand = GetInventoryItemLink("player", GetInventorySlotInfo("SecondaryHandSlot"))
+		S.offhand = GetInventoryItemLink("player", GetInventorySlotInfo("SecondaryHandSlot"))
 		if (SP_ST_GS["icons"] ~= 0) then
 			SP_ST_offhand:SetTexture(GetInventoryItemTexture("player", GetInventorySlotInfo("SecondaryHandSlot")));
 		end
@@ -459,7 +566,7 @@ local function UpdateWeapon()
 		SP_ST_FrameOFF:Hide()
 	end
 	if hasRanged() then
-		range = GetInventoryItemLink("player", GetInventorySlotInfo("RangedSlot"))
+		S.range = GetInventoryItemLink("player", GetInventorySlotInfo("RangedSlot"))
 		if (SP_ST_GS["icons"] ~= 0) then
 			SP_ST_range:SetTexture(GetInventoryItemTexture("player", GetInventorySlotInfo("RangedSlot")))
 		end
@@ -469,16 +576,23 @@ local function UpdateWeapon()
 end
 
 local function ResetTimer(off,ranged)
+	-- Get latency offset to compensate for network delay
+	-- The swing actually happened lag_offset seconds ago on the server
+	local lag_offset = GetLagOffset()
+
 	if not off and not ranged then
 		st_timerMax = GetWeaponSpeed(off)
-		st_timer = GetWeaponSpeed(off)
+		st_timer = GetWeaponSpeed(off) - lag_offset
+		if st_timer < 0 then st_timer = 0 end
 	elseif off and not ranged then
 		st_timerOffMax = GetWeaponSpeed(off)
-		st_timerOff = GetWeaponSpeed(off)
+		st_timerOff = GetWeaponSpeed(off) - lag_offset
+		if st_timerOff < 0 then st_timerOff = 0 end
 	else
-		range_fader = GetTime()
+		S.range_fader = GetTime()
 		st_timerRangeMax = GetWeaponSpeed(false,true)
-		st_timerRange = GetWeaponSpeed(false,true)
+		st_timerRange = GetWeaponSpeed(false,true) - lag_offset
+		if st_timerRange < 0 then st_timerRange = 0 end
 	end
 
 	if not off and not ranged then SP_ST_Frame:Show() end
@@ -496,15 +610,17 @@ local function UpdateDisplay()
 	local show_oh = SP_ST_GS["show_oh"]
 	local show_range = SP_ST_GS["show_range"]
 	local show_hs = SP_ST_GS["show_hs"]
+	local _, _, br, bg, bb = string.find(SP_ST_GS["colorBar"] or "1,1,1", "([%d%.]+),([%d%.]+),([%d%.]+)")
+	br, bg, bb = tonumber(br) or 1, tonumber(bg) or 1, tonumber(bb) or 1
 	if SP_ST_InRange() then
 		if show_hs and CleaveQueued() then
 			SP_ST_FrameTime:SetVertexColor(0.2, 0.9, 0.2); -- Green for Cleave
 		elseif show_hs and HeroicStrikeQueued() then
 			SP_ST_FrameTime:SetVertexColor(0.9, 0.9, 0.2); -- Yellow for Heroic Strike
 		else
-			SP_ST_FrameTime:SetVertexColor(1.0, 1.0, 1.0); -- White for Auto 
+			SP_ST_FrameTime:SetVertexColor(br, bg, bb); -- User color for Auto
 		end
-		SP_ST_FrameTime2:SetVertexColor(1.0, 1.0, 1.0);
+		SP_ST_FrameTime2:SetVertexColor(br, bg, bb);
 		SP_ST_Frame:SetBackdropColor(0,0,0,0.8);
 		SP_ST_FrameOFF:SetBackdropColor(0,0,0,0.8);
 	else
@@ -514,14 +630,14 @@ local function UpdateDisplay()
 		SP_ST_FrameOFF:SetBackdropColor(1,0,0,0.8);
 	end
 	if CheckInteractDistance("target",4) then
-		SP_ST_FrameTime3:SetVertexColor(1.0, 1.0, 1.0);
+		SP_ST_FrameTime3:SetVertexColor(br, bg, bb);
 		SP_ST_FrameRange:SetBackdropColor(0,0,0,0.8);
 	else
 		SP_ST_FrameTime3:SetVertexColor(1.0, 0, 0);
 		SP_ST_FrameRange:SetBackdropColor(1,0,0,0.8);
 	end
 	-- most classes won't want ranged indicator to stay up all the time
-	if GetTime() - 10 > range_fader then
+	if GetTime() - 10 > S.range_fader then
 		SP_ST_FrameRange:Hide()
 	end
 
@@ -532,7 +648,7 @@ local function UpdateDisplay()
 			SP_ST_FrameTime:Hide()
 		end
 
-		if (not combat and not configmod) then
+		if (not S.combat and not S.configmod) then
 			SP_ST_Frame:Hide()
 		end
 	else
@@ -554,6 +670,13 @@ local function UpdateDisplay()
 			if (math.floor(showtmr) == showtmr) then
 				showtmr = showtmr..".0";
 			end
+			-- Optionally show distance using UnitXP
+			if SP_ST_GS["show_dist"] and has_unitxp and UnitExists("target") then
+				local dist = UnitXP("distanceBetween", "player", "target", "meleeAutoAttack")
+				if dist then
+					showtmr = showtmr .. " |cff888888" .. string.format("%.1fy", dist) .. "|r"
+				end
+			end
 			SP_ST_maintimer:SetText(showtmr);
 		end
 	end
@@ -566,7 +689,7 @@ local function UpdateDisplay()
 				SP_ST_FrameTime3:Hide()
 			end
 
-			if (not combat and not configmod) then
+			if (not S.combat and not S.configmod) then
 				SP_ST_FrameRange:Hide()
 			end
 		else
@@ -603,7 +726,7 @@ local function UpdateDisplay()
 				SP_ST_FrameTime2:Hide()
 			end
 
-			if (not combat and not configmod) then
+			if (not S.combat and not S.configmod) then
 				SP_ST_FrameOFF:Hide()
 			end
 		else
@@ -635,114 +758,34 @@ end
 
 --------------------------------------------------------------------------------
 
--- register action bars changing or world enter and identify an instant attack like backstab or sinister strike or hamstring or sunder armor or bloodthirst
--- check these slots for range
-
-local instants = {
-	["Backstab"] = 1,
-	["Sinister Strike"] = 1,
-	["Kick"] = 1,
-	["Expose Armor"] = 1,
-	["Eviscerate"] = 1,
-	["Rupture"] = 1,
-	["Kidney Shot"] = 1,
-	["Garrote"] = 1,
-	["Ambush"] = 1,
-	["Cheap Shot"] = 1,
-	["Gouge"] = 1,
-	["Feint"] = 1,
-	["Ghosly Strike"] = 1,
-	["Hemorrhage"] = 1,
-	-- ["Riposte"] = 1, -- maybe
-
-	["Hamstring"] = 1,
-	["Sunder Armor"] = 1,
-	["Bloodthirst"] = 1,
-	["Mortal Strike"] = 1,
-	["Shield Slam"] = 1,
-	["Overpower"] = 1,
-	["Revenge"] = 1,
-	["Pummel"] = 1,
-	["Shield Bash"] = 1,
-	["Disarm"] = 1,
-	["Execute"] = 1,
-	["Taunt"] = 1,
-	["Mocking Blow"] = 1,
-	["Slam"] = 1,
-	-- ["Decisive Strike"] = 1,
-	["Rend"] = 1,
-
-	["Crusader Strike"] = 1,
-	["Holy Strike"] = 1,
-
-	["Stormstrike"] = 1,
-	["Lightning Strike"] = 1,
-
-	["Savage Bite"] = 1,
-	["Growl"] = 1,
-	["Bash"] = 1,
-	["Swipe"] = 1,
-	["Claw"] = 1,
-	["Rip"] = 1,
-	["Ferocious Bite"] = 1,
-	["Shred"] = 1,
-	["Rake"] = 1,
-	["Cower"] = 1,
-	["Ravage"] = 1,
-	["Pounce"] = 1,
-
-	["Wing Clip"] = 1,
-	["Disengage"] = 1,
-	["Carve"] = 1, -- twow
-	-- ["Counterattack"] = 1, -- maybe
-}
-
-local range_check_slot = nil
-function SP_ST_Check_Actions(slot)
-	if slot then
-		local name,actionType,identifier = GetActionText(slot);
-
-		if actionType and identifier and actionType == "SPELL" then
-			local name,rank,texture = SpellInfo(identifier)
-			if instants[name] then
-				range_check_slot = i
-				return -- done
-			end
-		end
-	end
-
-	for i=1,120 do
-		local name,actionType,identifier = GetActionText(i);
-		-- if ActionHasRange(i) then
-		-- 	print(SpellInfo(identifier))
-		-- end
-
-		if actionType and identifier and actionType == "SPELL" then
-			local name,rank,texture = SpellInfo(identifier)
-			if instants[name] then
-				range_check_slot = i
-				-- print(range_check_slot)
-				-- print(name)
-				return
-			end
-		end
-	end
-	-- no hits?
-	range_check_slot = nil
-end
-
+-- UnitXP provides accurate melee range detection without needing to scan action bars
 function SP_ST_InRange()
-	-- if the slot is nil anyway then there's no sense being red all the time
-	return range_check_slot == nil or IsActionInRange(range_check_slot) == 1
+	if not UnitExists("target") then
+		return true -- no target, don't show red
+	end
+
+	if has_unitxp then
+		-- UnitXP meleeAutoAttack distance is accurate for melee weapon swings
+		local dist = UnitXP("distanceBetween", "player", "target", "meleeAutoAttack")
+		return dist and dist <= 5 -- melee range is ~5 yards
+	else
+		-- Fallback: assume in range if no UnitXP
+		return true
+	end
 end
 
 function rangecheck()
-	print(SP_ST_InRange() and "yes" or "no")
+	if has_unitxp then
+		local dist = UnitXP("distanceBetween", "player", "target", "meleeAutoAttack")
+		print(dist and string.format("%.1f yards", dist) or "no target")
+	else
+		print("UnitXP not available")
+	end
 end
 
 function GetFlurry(class)
 	-- default multiplier
-	flurry_mult = 1.3
+	S.flurry_mult = 1.3
 
 	-- Defensive check 1: Exit if the class isn't in our data table.
 	if not flurry[class] then
@@ -756,15 +799,15 @@ function GetFlurry(class)
 			if name == "Flurry" then
 				-- Defensive check 2: If count is nil or 0, there is no bonus.
 				if not count or count == 0 then
-					flurry_mult = 1
+					S.flurry_mult = 1
 				else
 					-- Only proceed if count is a valid number (1-5).
 					-- Check if the value exists before using it.
 					if flurry[class][count] then
-						flurry_mult = 1 + (flurry[class][count] / 100)
+						S.flurry_mult = 1 + (flurry[class][count] / 100)
 					else
 						-- Fallback if count is an unexpected number (e.g., > 5)
-						flurry_mult = 1
+						S.flurry_mult = 1
 					end
 				end
 				return
@@ -772,6 +815,9 @@ function GetFlurry(class)
 		end
 	end
 end
+
+-- Flag to prevent UnitXP calls during logout (crash prevention)
+local SP_ST_IsLoggingOut = false
 
 function SP_ST_OnLoad()
 	this:RegisterEvent("ADDON_LOADED")
@@ -788,10 +834,28 @@ function SP_ST_OnLoad()
 	-- this:RegisterEvent("PLAYER_AURAS_CHANGED")
 	this:RegisterEvent("PLAYER_ENTERING_WORLD")
 	this:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+	-- SPELL_QUEUE_EVENT registered in ADDON_LOADED after feature detection
+	-- Register logout events to prevent UnitXP crash during logout
+	this:RegisterEvent("PLAYER_LOGOUT")
+	this:RegisterEvent("PLAYER_LEAVING_WORLD")
 end
 
 function SP_ST_OnEvent()
+	-- Handle logout to prevent UnitXP crashes during shutdown
+	if (event == "PLAYER_LOGOUT" or event == "PLAYER_LEAVING_WORLD") then
+		SP_ST_IsLoggingOut = true
+		return
+	end
 	if (event == "ADDON_LOADED" and arg1 == "SP_SwingTimer") then
+		-- Detect SuperWoW extensions safely
+		DetectFeatures()
+
+		-- Register Nampower events if available
+		if has_nampower then
+			this:RegisterEvent("SPELL_QUEUE_EVENT")
+			this:RegisterEvent("SPELL_CAST_EVENT")
+		end
+
 		if (SP_ST_GS == nil) then
 			StaticPopup_Show("SP_ST_Install")
 		end
@@ -799,7 +863,7 @@ function SP_ST_OnEvent()
 		default_bg2 = SP_ST_FrameOFF:GetBackdrop()
 		default_bg3 = SP_ST_FrameRange:GetBackdrop()
 
-		if (SP_ST_GS ~= nil) then 
+		if (SP_ST_GS ~= nil) then
 			for k,v in pairs(defaults) do
 				if (SP_ST_GS[k] == nil) then
 					SP_ST_GS[k] = defaults[k];
@@ -812,100 +876,143 @@ function SP_ST_OnEvent()
 		UpdateAppearance()
 		if not st_timerMax then st_timerMax = GetWeaponSpeed(false) end
 		if not st_timerOffMax and isDualWield() then st_timerOffMax = GetWeaponSpeed(true) end
-		if not st_timerRangeMax and isDualWield() then st_timerRangeMax = GetWeaponSpeed(nil,true) end
+		if not st_timerRangeMax and hasRanged() then st_timerRangeMax = GetWeaponSpeed(nil,true) end
 		print("SP_SwingTimer " .. version .. " loaded. Options: /st")
 	elseif (event == "PLAYER_ENTERING_WORLD") then
-		_,player_guid = UnitExists("player")
-		if UnitAffectingCombat('player') then combat = true else combat = false end
+		_,S.player_guid = UnitExists("player")
+		_,S.player_class = UnitClass("player")
+		if UnitAffectingCombat('player') then S.combat = true else S.combat = false end
+		GetFlurry(S.player_class)
 		CheckFlurry()
 		UpdateDisplay()
-		SP_ST_Check_Actions()
 		UpdateHeroicStrike()
 		UpdateCleave()
 	elseif (event == "PLAYER_REGEN_ENABLED") then
-		_,player_guid = UnitExists("player")
-		_,player_class = UnitClass("player")
-		if UnitAffectingCombat('player') then combat = true else combat = false end
+		_,S.player_guid = UnitExists("player")
+		_,S.player_class = UnitClass("player")
+		if UnitAffectingCombat('player') then S.combat = true else S.combat = false end
 
-		GetFlurry(player_class)
+		GetFlurry(S.player_class)
 		CheckFlurry()
 		UpdateDisplay()
-		SP_ST_Check_Actions()
 	elseif (event == "PLAYER_REGEN_DISABLED") then
-		combat = true
-		wf_swings = 0
+		S.combat = true
+		S.wf_swings = 0
 		CheckFlurry()
 	elseif (event == "CHARACTER_POINTS_CHANGED") then
-		GetFlurry(player_class)
+		GetFlurry(S.player_class)
 	elseif (event == "ACTIONBAR_SLOT_CHANGED") then
-		SP_ST_Check_Actions(arg1)
-		HeroicStrikeQueued()
-		CleaveQueued()
-	elseif (event == "UNIT_CASTEVENT" and arg1 == player_guid) then
+		UpdateHeroicStrike()
+		UpdateCleave()
+	elseif (event == "SPELL_QUEUE_EVENT") then
+		-- Nampower on-swing spell queue tracking (arg1 = eventCode, arg2 = spellId)
+		OnSpellQueueEvent(arg1, arg2)
+	elseif (event == "SPELL_CAST_EVENT") then
+		-- Nampower latency measurement: arg1=success, arg2=spellId
+		-- Measure time between cast start and server confirmation
+		if S.pending_cast_spell and arg2 == S.pending_cast_spell and S.pending_cast_time then
+			local round_trip = GetTime() - S.pending_cast_time
+			-- Only use reasonable samples (10-500ms)
+			if round_trip > 0.01 and round_trip < 0.5 and SP_ST_GS["autolag"] then
+				AddLagSample(round_trip)
+			end
+			S.pending_cast_spell = nil
+			S.pending_cast_time = nil
+		end
+	elseif (event == "UNIT_CASTEVENT" and arg1 == S.player_guid) then
 		local spell = SpellInfo(arg4)
+
+		-- Track spell cast start for Nampower latency measurement
+		if arg3 == "START" and has_nampower then
+			S.pending_cast_time = GetTime()
+			S.pending_cast_spell = arg4
+		end
 		-- print(spell .. " "..arg4)
 
 		-- wf proc happens first, then the normal hit, then the 1-2 wf hits
-		-- if flurry_count > 0 then
+		-- if S.flurry_count > 0 then
 		if (arg4 == 51368 or arg4 == 16361) then
-			wf_swings = wf_swings + ((arg4 == 51368) and 1 or 2)
+			S.wf_swings = S.wf_swings + ((arg4 == 51368) and 1 or 2)
 			return
 		end
 
 		if spell == "Flurry" then
 			-- track a completely fresh flurry for timing
-			flurry_fresh = flurry_count < 1
-			flurry_count = 3
+			S.flurry_fresh = S.flurry_count < 1
+			S.flurry_count = 3
 			return
 		end
 
 		if spell == "Elemental Flurry" then
-			ele_flurry_fresh = true
+			S.ele_flurry_fresh = true
 		end
+
+		-- Slam: timer keeps running during cast, but auto-attack is held until cast finishes
+		-- We don't need to handle Slam specially - the held auto-attack fires naturally
+		-- after Slam ends and will be detected by the normal auto-attack handler below
 
 		if arg4 == 6603 then -- autoattack
 			if arg3 == "MAINHAND" then
+				-- Measure latency: time between timer hitting 0 and receiving swing event
+				if S.timer_zero_time and SP_ST_GS["autolag"] then
+					local lag_sample = GetTime() - S.timer_zero_time
+					-- Only use reasonable samples (< 500ms)
+					if lag_sample > 0 and lag_sample < 0.5 then
+						AddLagSample(lag_sample * 2) -- multiply by 2 since this is one-way
+					end
+				end
+				S.timer_zero_time = nil
+
 				ResetTimer(false)
 
-				if ele_flurry_fresh then
+				if S.ele_flurry_fresh then
 					st_timer = st_timer / 1.3
 					st_timerMax = st_timerMax / 1.3
-					ele_flurry_fresh = false
+					S.ele_flurry_fresh = false
 				end
-				if not ele_flurry_fresh and ele_flurry_fresh ~= nil then
+				if not S.ele_flurry_fresh and S.ele_flurry_fresh ~= nil then
 					st_timer = st_timer * 1.3
 					st_timerMax = st_timerMax * 1.3
-					ele_flurry_fresh = nil
+					S.ele_flurry_fresh = nil
 				end
 
-				if flurry_fresh then -- fresh flurry, decrease the swing cooldown of the next swing
-					st_timer = st_timer / flurry_mult
-					st_timerMax = st_timerMax / flurry_mult
-					flurry_fresh = false
+				if S.flurry_fresh then -- fresh flurry, decrease the swing cooldown of the next swing
+					st_timer = st_timer / S.flurry_mult
+					st_timerMax = st_timerMax / S.flurry_mult
+					S.flurry_fresh = false
 				end
-				if flurry_count == 0 then -- used up last flurry
-					st_timer = st_timer * flurry_mult
-					st_timerMax = st_timerMax * flurry_mult
+				if S.flurry_count == 0 then -- used up last flurry
+					st_timer = st_timer * S.flurry_mult
+					st_timerMax = st_timerMax * S.flurry_mult
 				end
 			elseif arg3 == "OFFHAND" then
+				-- Measure latency for offhand
+				if S.timer_zero_timeOH and SP_ST_GS["autolag"] then
+					local lag_sample = GetTime() - S.timer_zero_timeOH
+					if lag_sample > 0 and lag_sample < 0.5 then
+						AddLagSample(lag_sample * 2)
+					end
+				end
+				S.timer_zero_timeOH = nil
+
 				ResetTimer(true)
 
-				if flurry_fresh then -- fresh flurry, decrease the swing cooldown of the next swing
-					st_timerOff = st_timerOff / flurry_mult
-					st_timerOffMax = st_timerOffMax / flurry_mult
-					flurry_fresh = false
+				if S.flurry_fresh then -- fresh flurry, decrease the swing cooldown of the next swing
+					st_timerOff = st_timerOff / S.flurry_mult
+					st_timerOffMax = st_timerOffMax / S.flurry_mult
+					S.flurry_fresh = false
 				end
-				if flurry_count == 0 then -- used up last flurry
-					st_timerOff = st_timerOff * flurry_mult
-					st_timerOffMax = st_timerOffMax * flurry_mult
+				if S.flurry_count == 0 then -- used up last flurry
+					st_timerOff = st_timerOff * S.flurry_mult
+					st_timerOffMax = st_timerOffMax * S.flurry_mult
 				end
 			end
-			-- print(GetTime() .. " normal swing "..flurry_count)
-			-- print(GetTime() .. " wf_swing "..wf_swings)
-			if wf_swings > 0 then
-				wf_swings = wf_swings - 1
+			-- print(GetTime() .. " normal swing "..S.flurry_count)
+			-- print(GetTime() .. " wf_swing "..S.wf_swings)
+			if S.wf_swings > 0 then
+				S.wf_swings = S.wf_swings - 1
 			else
-				flurry_count = flurry_count - 1 -- normal swing occured, reduce flurry counter
+				S.flurry_count = S.flurry_count - 1 -- normal swing occured, reduce flurry counter
 			end
 			return
 		elseif arg3 == "CAST" and arg4 == 5019 then
@@ -917,43 +1024,44 @@ function SP_ST_OnEvent()
 		-- check for attacks that take the place of autoattack
 		for _,v in L['combatSpells'] do
 			if spell == v and arg3 == "CAST" then
-				-- print(spellname .. " " .. flurry_count)
-				-- print(format("sp %.3f",GetWeaponSpeed(false)) .. " " .. flurry_count)
+				-- print(spellname .. " " .. S.flurry_count)
+				-- print(format("sp %.3f",GetWeaponSpeed(false)) .. " " .. S.flurry_count)
 				ResetTimer(false)
-				if flurry_fresh then
-					st_timer = st_timer / flurry_mult
-					st_timerMax = st_timerMax / flurry_mult
+				if S.flurry_fresh then
+					st_timer = st_timer / S.flurry_mult
+					st_timerMax = st_timerMax / S.flurry_mult
+					S.flurry_fresh = false
 				end
-				if flurry_count == 0 then -- used up last flurry
-					st_timer = st_timer * flurry_mult
-					st_timerMax = st_timerMax * flurry_mult
+				if S.flurry_count == 0 then -- used up last flurry
+					st_timer = st_timer * S.flurry_mult
+					st_timerMax = st_timerMax * S.flurry_mult
 				end
-				flurry_count = flurry_count - 1 -- swing occured, reduce flurry counter
+				S.flurry_count = S.flurry_count - 1 -- swing occured, reduce flurry counter
 				return
 			end
 		end
 
 	elseif (event == "UNIT_INVENTORY_CHANGED") then
 		if (arg1 == "player") then
-			local oldWep = weapon
-			local oldOff = offhand
-			local oldRange = range
+			local oldWep = S.weapon
+			local oldOff = S.offhand
+			local oldRange = S.range
 
 			UpdateWeapon()
-			if (combat and oldWep ~= weapon) then
+			if (S.combat and oldWep ~= S.weapon) then
 				ResetTimer(false)
 			end
 
-			if offhand then
+			if S.offhand then
 				-- don't forget OH timer just because you put on a shield, you might still care, especially for macros
-				local _,_,itemId = string.find(offhand,"item:(%d+)")
+				local _,_,itemId = string.find(S.offhand,"item:(%d+)")
 				local _name,_link,_,_lvl,wep_type,_subtype,_ = GetItemInfo(itemId)
-				if (combat and isDualWield() and ((oldOff ~= offhand) and (wep_type and wep_type == "Weapon"))) then
+				if (S.combat and isDualWield() and ((oldOff ~= S.offhand) and (wep_type and wep_type == "Weapon"))) then
 					ResetTimer(true)
 				end
 			end
 
-			if (combat and oldRange ~= range) then
+			if (S.combat and oldRange ~= S.range) then
 				ResetTimer(nil,true)
 			end
 
@@ -968,7 +1076,7 @@ function SP_ST_OnEvent()
 					local reduct = GetWeaponSpeed(true) * 0.40
 					st_timerOff = st_timerOff - reduct
 					if st_timerOff < minimum then
-						st_timer = minimum
+						st_timerOff = minimum
 					end
 					return -- offhand gets the parry haste benefit, return
 				end
@@ -989,16 +1097,26 @@ function SP_ST_OnEvent()
 end
 
 function SP_ST_OnUpdate(delta)
-	if (st_timer > 0) and not paused_swing then
+	-- Prevent UnitXP calls during logout (crash prevention)
+	if SP_ST_IsLoggingOut then return end
+	if (st_timer > 0) then
 		st_timer = st_timer - delta
-		if (st_timer < 0) then
+		if (st_timer <= 0) then
 			st_timer = 0
+			-- Record when timer hit zero for latency estimation
+			if not S.timer_zero_time and S.combat then
+				S.timer_zero_time = GetTime()
+			end
 		end
 	end
-	if (st_timerOff > 0) and not paused_swingOH then
+	if (st_timerOff > 0) then
 		st_timerOff = st_timerOff - delta
-		if (st_timerOff < 0) then
+		if (st_timerOff <= 0) then
 			st_timerOff = 0
+			-- Record when timer hit zero for latency estimation
+			if not S.timer_zero_timeOH and S.combat then
+				S.timer_zero_timeOH = GetTime()
+			end
 		end
 	end
 	if (st_timerRange > 0) then
@@ -1030,14 +1148,14 @@ local function ChatHandler(msg)
 		print("Reset to defaults.")
 	elseif cmd == "move" then
 		if (arg == "on") then
-			configmod = true;
+			S.configmod = true;
 			SP_ST_Frame:Show();
 			SP_ST_FrameOFF:Show();
 			MakeMovable(SP_ST_Frame);
 		else
 			SP_ST_Frame:SetMovable(false);
 			_,_,_,SP_ST_GS["x"], SP_ST_GS["y"]= SP_ST_Frame:GetPoint()
-			configmod = false;
+			S.configmod = false;
 			UpdateAppearance();
 		end
 	elseif cmd == "offhand" then
@@ -1049,6 +1167,55 @@ local function ChatHandler(msg)
 	elseif cmd == "hs" then
 		SP_ST_GS["show_hs"] = not SP_ST_GS["show_hs"]
 		print("toggled showing HS/Cleave queue display: " .. (SP_ST_GS["show_hs"] and "on" or "off"))
+	elseif cmd == "dist" then
+		if has_unitxp then
+			SP_ST_GS["show_dist"] = not SP_ST_GS["show_dist"]
+			print("toggled showing distance: " .. (SP_ST_GS["show_dist"] and "on" or "off"))
+		else
+			print("Distance display requires UnitXP")
+		end
+	elseif cmd == "lag" then
+		if arg then
+			local ms = tonumber(arg)
+			if ms and ms >= 0 then
+				SP_ST_GS["lag"] = ms
+				print("Latency offset set to " .. ms .. "ms" .. (ms == 0 and " (using auto)" or ""))
+			else
+				print("Usage: /st lag <milliseconds> (0 = auto)")
+			end
+		else
+			local current = SP_ST_GS["lag"] or 0
+			local auto = math.floor(S.estimated_lag * 1000 + 0.5)
+			local source = has_nampower and "Nampower" or "swing timing"
+			print("Latency: manual=" .. current .. "ms, auto=" .. auto .. "ms (" .. source .. "), using=" .. math.floor(GetLagOffset() * 1000 + 0.5) .. "ms")
+		end
+	elseif cmd == "autolag" then
+		SP_ST_GS["autolag"] = not SP_ST_GS["autolag"]
+		print("Auto latency detection: " .. (SP_ST_GS["autolag"] and "on" or "off"))
+		if SP_ST_GS["autolag"] then
+			S.lag_samples = {}
+			S.estimated_lag = 0
+			print("Latency samples reset. Attack a target to calibrate.")
+		end
+	elseif cmd == "colorbar" or cmd == "colortimer" then
+		if arg == nil then
+			print("Usage: /st colorbar R,G,B  or  /st colortimer R,G,B")
+			return
+		end
+		local rgb = SplitString(arg, ",")
+		local r = tonumber(rgb[1])
+		local g = tonumber(rgb[2])
+		local b = tonumber(rgb[3])
+		if r and g and b and r >= 0 and r <= 1 and g >= 0 and g <= 1 and b >= 0 and b <= 1 then
+			if cmd == "colorbar" then
+				SP_ST_GS["colorBar"] = r..","..g..","..b
+			elseif cmd == "colortimer" then
+				SP_ST_GS["colorTimer"] = r..","..g..","..b
+			end
+			UpdateAppearance()
+		else
+			print("Error: Invalid argument")
+		end
 	elseif settings[cmd] ~= nil then
 		if arg ~= nil then
 			local number = tonumber(arg)
@@ -1069,6 +1236,9 @@ local function ChatHandler(msg)
 		print("/st offhand (Toggle offhand display)")
 		print("/st range (Toggle range wep display)")
 		print("/st hs (Toggle HS/Cleave queue display)")
+		print("/st dist (Toggle distance display - requires UnitXP)")
+		print("/st lag [ms] (Set/show latency offset, 0=auto)")
+		print("/st autolag (Toggle auto latency detection)")
 	end
 	TestShow()
 end
