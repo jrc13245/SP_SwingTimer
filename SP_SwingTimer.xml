@@ -29,9 +29,6 @@
 			<AbsDimension x="200" y="10" />
 		</Size>
 
-		<Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background">
-		</Backdrop>
-
 		<Layers>
 			<Layer level="ARTWORK">
 				<Texture name="SP_ST_mainhand">
@@ -62,9 +59,6 @@
 			<AbsDimension x="200" y="10" />
 		</Size>
 
-		<Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background">
-		</Backdrop>
-
 		<Layers>
 			<Layer level="ARTWORK">
 				<Texture name="SP_ST_offhand">
@@ -94,9 +88,6 @@
 		<Size>
 			<AbsDimension x="200" y="10" />
 		</Size>
-
-		<Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background">
-		</Backdrop>
 
 		<Layers>
 			<Layer level="ARTWORK">

@@ -9,11 +9,13 @@ local defaults = {
 	b = 2,
 	a = 1,
 	s = 1,
-	vo = -2,
+	vo = -6,
 	ho = 0,
 	move = "off",
 	icons = 1,
 	bg = 1,
+	border = 1,
+	bga = 0.8,
 	timers = 1,
 	style = 2,
 	colorBar = "1,1,1",
@@ -27,9 +29,20 @@ local defaults = {
 	autolag = true, -- auto-estimate latency using spell timing
 }
 
-local default_bg1 = nil
-local default_bg2 = nil
-local default_bg3 = nil
+local backdrop_with_border = {
+	bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+	edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+	tile = true,
+	tileSize = 16,
+	edgeSize = 8,
+	insets = { left = 2, right = 2, top = 2, bottom = 2 },
+}
+
+local backdrop_no_border = {
+	bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+	tile = true,
+	tileSize = 16,
+}
 
 local settings = {
 	x = "Bar X position",
@@ -43,6 +56,8 @@ local settings = {
 	ho = "Offhand bar horizontal offset",
 	icons = "Show weapon icons (1 = show, 0 = hide)",
 	bg = "Show background (1 = show, 0 = hide)",
+	border = "Show border (1 = show, 0 = hide)",
+	bga = "Background alpha (0-1)",
 	timers = "Show weapon timers (1 = show, 0 = hide)",
 	style = "Choose 1, 2, 3, 4, 5 or 6",
 	move = "Enable bars movement",
@@ -405,11 +420,19 @@ local function UpdateAppearance()
 	SP_ST_maintimer:SetPoint("RIGHT", "SP_ST_Frame", "CENTER", 7, 0)
 	SP_ST_maintimer:SetFont("Fonts\\FRIZQT__.TTF", SP_ST_GS["h"])
 
-	if (SP_ST_GS["bg"] ~= 0) then SP_ST_Frame:SetBackdrop(default_bg1) else SP_ST_Frame:SetBackdrop(nil) end
+	if SP_ST_GS["bg"] ~= 0 then
+		local backdrop = SP_ST_GS["border"] ~= 0 and backdrop_with_border or backdrop_no_border
+		local bga = SP_ST_GS["bga"] or 0.8
+		SP_ST_Frame:SetBackdrop(backdrop)
+		SP_ST_FrameOFF:SetBackdrop(backdrop)
+		SP_ST_Frame:SetBackdropColor(0, 0, 0, bga)
+		SP_ST_FrameOFF:SetBackdropColor(0, 0, 0, bga)
+	else
+		SP_ST_Frame:SetBackdrop(nil)
+		SP_ST_FrameOFF:SetBackdrop(nil)
+	end
 
 	SP_ST_offtimer:SetFont("Fonts\\FRIZQT__.TTF", SP_ST_GS["h"])
-
-	if (SP_ST_GS["bg"] ~= 0) then SP_ST_FrameOFF:SetBackdrop(default_bg2) else SP_ST_FrameOFF:SetBackdrop(nil) end
 
 -- Set timer text color from settings
 	local _, _, r, g, b = string.find(SP_ST_GS["colorTimer"] or "0,0,0", "([%d%.]+),([%d%.]+),([%d%.]+)")
@@ -417,14 +440,21 @@ local function UpdateAppearance()
 	SP_ST_maintimer:SetTextColor(r, g, b, 1)
 	SP_ST_offtimer:SetTextColor(r, g, b, 1)
 
-	SP_ST_FrameOFF:SetPoint("TOPLEFT", "SP_ST_Frame", "BOTTOMLEFT", 0, 0);
+	SP_ST_FrameOFF:SetPoint("TOPLEFT", "SP_ST_Frame", "BOTTOMLEFT", SP_ST_GS["ho"], SP_ST_GS["vo"]);
 	SP_ST_offtimer:SetPoint("RIGHT", "SP_ST_FrameOFF", "CENTER", 7, 0)
 	SP_ST_FrameRange:SetPoint("TOPLEFT", "SP_ST_FrameOFF", "BOTTOMLEFT", SP_ST_GS["ho"], SP_ST_GS["vo"]);
 	SP_ST_rangetimer:SetPoint("RIGHT", "SP_ST_FrameRange", "RIGHT", -2, 0)
 	SP_ST_rangetimer:SetFont("Fonts\\FRIZQT__.TTF", SP_ST_GS["h"])
 	SP_ST_rangetimer:SetTextColor(r, g, b, 1)
 
-	if (SP_ST_GS["bg"] ~= 0) then SP_ST_FrameRange:SetBackdrop(default_bg3) else SP_ST_FrameRange:SetBackdrop(nil) end
+	if SP_ST_GS["bg"] ~= 0 then
+		local backdrop = SP_ST_GS["border"] ~= 0 and backdrop_with_border or backdrop_no_border
+		local bga = SP_ST_GS["bga"] or 0.8
+		SP_ST_FrameRange:SetBackdrop(backdrop)
+		SP_ST_FrameRange:SetBackdropColor(0, 0, 0, bga)
+	else
+		SP_ST_FrameRange:SetBackdrop(nil)
+	end
 
 	if (SP_ST_GS["icons"] ~= 0) then
 		SP_ST_mainhand:SetTexture(GetInventoryItemTexture("player", GetInventorySlotInfo("MainHandSlot")));
@@ -621,20 +651,32 @@ local function UpdateDisplay()
 			SP_ST_FrameTime:SetVertexColor(br, bg, bb); -- User color for Auto
 		end
 		SP_ST_FrameTime2:SetVertexColor(br, bg, bb);
-		SP_ST_Frame:SetBackdropColor(0,0,0,0.8);
-		SP_ST_FrameOFF:SetBackdropColor(0,0,0,0.8);
+		if SP_ST_GS["bg"] ~= 0 then
+			local bga = SP_ST_GS["bga"] or 0.8
+			SP_ST_Frame:SetBackdropColor(0,0,0,bga);
+			SP_ST_FrameOFF:SetBackdropColor(0,0,0,bga);
+		end
 	else
 		SP_ST_FrameTime:SetVertexColor(1.0, 0, 0); -- Red if out of range
 		SP_ST_FrameTime2:SetVertexColor(1.0, 0, 0);
-		SP_ST_Frame:SetBackdropColor(1,0,0,0.8);
-		SP_ST_FrameOFF:SetBackdropColor(1,0,0,0.8);
+		if SP_ST_GS["bg"] ~= 0 then
+			local bga = SP_ST_GS["bga"] or 0.8
+			SP_ST_Frame:SetBackdropColor(1,0,0,bga);
+			SP_ST_FrameOFF:SetBackdropColor(1,0,0,bga);
+		end
 	end
 	if CheckInteractDistance("target",4) then
 		SP_ST_FrameTime3:SetVertexColor(br, bg, bb);
-		SP_ST_FrameRange:SetBackdropColor(0,0,0,0.8);
+		if SP_ST_GS["bg"] ~= 0 then
+			local bga = SP_ST_GS["bga"] or 0.8
+			SP_ST_FrameRange:SetBackdropColor(0,0,0,bga);
+		end
 	else
 		SP_ST_FrameTime3:SetVertexColor(1.0, 0, 0);
-		SP_ST_FrameRange:SetBackdropColor(1,0,0,0.8);
+		if SP_ST_GS["bg"] ~= 0 then
+			local bga = SP_ST_GS["bga"] or 0.8
+			SP_ST_FrameRange:SetBackdropColor(1,0,0,bga);
+		end
 	end
 	-- most classes won't want ranged indicator to stay up all the time
 	if GetTime() - 10 > S.range_fader then
@@ -859,9 +901,6 @@ function SP_ST_OnEvent()
 		if (SP_ST_GS == nil) then
 			StaticPopup_Show("SP_ST_Install")
 		end
-		default_bg1 = SP_ST_Frame:GetBackdrop()
-		default_bg2 = SP_ST_FrameOFF:GetBackdrop()
-		default_bg3 = SP_ST_FrameRange:GetBackdrop()
 
 		if (SP_ST_GS ~= nil) then
 			for k,v in pairs(defaults) do
