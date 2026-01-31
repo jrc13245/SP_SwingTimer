@@ -493,20 +493,33 @@ local function UpdateAppearance()
 	SP_ST_FrameTime3:ClearAllPoints()
 
 	local style = SP_ST_GS["style"]
+	local icons_enabled = SP_ST_GS["icons"] ~= 0
 	if style == 1 or style == 2 then
 		SP_ST_mainhand:SetPoint("LEFT", "SP_ST_Frame", "LEFT");
 		SP_ST_offhand:SetPoint("LEFT", "SP_ST_FrameOFF", "LEFT");
 		SP_ST_range:SetPoint("LEFT", "SP_ST_FrameRange", "LEFT");
-		SP_ST_FrameTime:SetPoint("LEFT", "SP_ST_mainhand", "LEFT")
-		SP_ST_FrameTime2:SetPoint("LEFT", "SP_ST_FrameOFF", "LEFT") -- ??
-		SP_ST_FrameTime3:SetPoint("LEFT", "SP_ST_FrameRange", "LEFT") -- ??
+		if icons_enabled then
+			SP_ST_FrameTime:SetPoint("LEFT", "SP_ST_mainhand", "RIGHT")
+			SP_ST_FrameTime2:SetPoint("LEFT", "SP_ST_offhand", "RIGHT")
+			SP_ST_FrameTime3:SetPoint("LEFT", "SP_ST_range", "RIGHT")
+		else
+			SP_ST_FrameTime:SetPoint("LEFT", "SP_ST_Frame", "LEFT")
+			SP_ST_FrameTime2:SetPoint("LEFT", "SP_ST_FrameOFF", "LEFT")
+			SP_ST_FrameTime3:SetPoint("LEFT", "SP_ST_FrameRange", "LEFT")
+		end
 	elseif style == 3 or style == 4 then
 		SP_ST_mainhand:SetPoint("RIGHT", "SP_ST_Frame", "RIGHT");
 		SP_ST_offhand:SetPoint("RIGHT", "SP_ST_FrameOFF", "RIGHT");
 		SP_ST_range:SetPoint("RIGHT", "SP_ST_FrameRange", "RIGHT");
-		SP_ST_FrameTime:SetPoint("RIGHT", "SP_ST_mainhand", "RIGHT") -- ??
-		SP_ST_FrameTime2:SetPoint("RIGHT", "SP_ST_offhand", "RIGHT") -- ??
-		SP_ST_FrameTime3:SetPoint("RIGHT", "SP_ST_range", "RIGHT") -- ??
+		if icons_enabled then
+			SP_ST_FrameTime:SetPoint("RIGHT", "SP_ST_mainhand", "LEFT")
+			SP_ST_FrameTime2:SetPoint("RIGHT", "SP_ST_offhand", "LEFT")
+			SP_ST_FrameTime3:SetPoint("RIGHT", "SP_ST_range", "LEFT")
+		else
+			SP_ST_FrameTime:SetPoint("RIGHT", "SP_ST_Frame", "RIGHT")
+			SP_ST_FrameTime2:SetPoint("RIGHT", "SP_ST_FrameOFF", "RIGHT")
+			SP_ST_FrameTime3:SetPoint("RIGHT", "SP_ST_FrameRange", "RIGHT")
+		end
 	else
 		SP_ST_mainhand:SetTexture(nil);
 		SP_ST_mainhand:SetWidth(0);
@@ -695,7 +708,7 @@ local function UpdateDisplay()
 		end
 	else
 		SP_ST_FrameTime:Show()
-		local width = SP_ST_GS["w"]
+		local width = SP_ST_GS["w"] - SP_ST_mainhand:GetWidth()
 		local size = (st_timer / st_timerMax) * width
 		if style == 2 or style == 4 or style == 6 then
 			size = width - size
@@ -736,7 +749,7 @@ local function UpdateDisplay()
 			end
 		else
 			SP_ST_FrameTime3:Show()
-			local width = SP_ST_GS["w"]
+			local width = SP_ST_GS["w"] - SP_ST_range:GetWidth()
 			local size2 = (st_timerRange / st_timerRangeMax) * width
 			if style == 2 or style == 4 or style == 6 then
 				size2 = width - size2
@@ -773,7 +786,7 @@ local function UpdateDisplay()
 			end
 		else
 			SP_ST_FrameTime2:Show()
-			local width = SP_ST_GS["w"]
+			local width = SP_ST_GS["w"] - SP_ST_offhand:GetWidth()
 			local size2 = (st_timerOff / st_timerOffMax) * width
 			if style == 2 or style == 4 or style == 6 then
 				size2 = width - size2
