@@ -626,8 +626,8 @@ local function ResetTimer(off,ranged)
 	end
 
 	if not off and not ranged then SP_ST_Frame:Show() end
-	if (isDualWield()) then SP_ST_FrameOFF:Show() end
-	if (hasRanged()) then SP_ST_FrameRange:Show() end
+	if (isDualWield() and SP_ST_GS["show_oh"]) then SP_ST_FrameOFF:Show() end
+	if (hasRanged() and SP_ST_GS["show_range"]) then SP_ST_FrameRange:Show() end
 end
 
 local function TestShow()
@@ -918,6 +918,8 @@ function SP_ST_OnEvent()
 		if not st_timerRangeMax and hasRanged() then st_timerRangeMax = GetWeaponSpeed(nil,true) end
 		print("SP_SwingTimer " .. version .. " loaded. Options: /st")
 	elseif (event == "PLAYER_ENTERING_WORLD") then
+		-- Reset the logout flag - we're back in the world
+		SP_ST_IsLoggingOut = false
 		_,S.player_guid = UnitExists("player")
 		_,S.player_class = UnitClass("player")
 		if UnitAffectingCombat('player') then S.combat = true else S.combat = false end
