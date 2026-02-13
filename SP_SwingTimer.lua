@@ -678,7 +678,16 @@ local function UpdateDisplay()
 			SP_ST_FrameOFF:SetBackdropColor(1,0,0,bga);
 		end
 	end
-	if CheckInteractDistance("target",4) then
+	local rangeInRange = false
+	if has_unitxp and UnitExists("target") then
+		local dist = UnitXP("distanceBetween", "player", "target")
+		rangeInRange = dist and dist <= 35 -- ranged attack range ~30-35 yards
+	elseif UnitExists("target") then
+		rangeInRange = CheckInteractDistance("target", 4) -- ~28 yard fallback
+	else
+		rangeInRange = true -- no target, don't show red
+	end
+	if rangeInRange then
 		SP_ST_FrameTime3:SetVertexColor(br, bg, bb);
 		if SP_ST_GS["bg"] ~= 0 then
 			local bga = SP_ST_GS["bga"] or 0.8
@@ -691,8 +700,9 @@ local function UpdateDisplay()
 			SP_ST_FrameRange:SetBackdropColor(1,0,0,bga);
 		end
 	end
-	-- most classes won't want ranged indicator to stay up all the time
-	if GetTime() - 10 > S.range_fader then
+	-- Hunters keep ranged bar visible during combat; other classes fade after 10s
+	local isHunter = S.player_class == "HUNTER"
+	if not isHunter and GetTime() - 10 > S.range_fader then
 		SP_ST_FrameRange:Hide()
 	end
 
@@ -1069,8 +1079,8 @@ function SP_ST_OnEvent()
 				S.flurry_count = S.flurry_count - 1 -- normal swing occured, reduce flurry counter
 			end
 			return
-		elseif arg3 == "CAST" and arg4 == 5019 then
-			-- wand shoot, treat wand as offhand, no reason no to
+		elseif arg3 == "CAST" and (arg4 == 5019 or arg4 == 75) then
+			-- wand shoot (5019) or Auto Shot (75) for hunters
 			ResetTimer(nil,true)
 			return
 		end
