@@ -1207,7 +1207,10 @@ local function ChatHandler(msg)
 			SP_ST_FrameOFF:Show();
 			MakeMovable(SP_ST_Frame);
 		else
+			SP_ST_Frame:StopMovingOrSizing();
 			SP_ST_Frame:SetMovable(false);
+			SP_ST_Frame:SetScript("OnDragStart", nil);
+			SP_ST_Frame:SetScript("OnDragStop", nil);
 			_,_,_,SP_ST_GS["x"], SP_ST_GS["y"]= SP_ST_Frame:GetPoint()
 			S.configmod = false;
 			UpdateAppearance();
