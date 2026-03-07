@@ -1,5 +1,10 @@
-CLAUDE.md
+wow-api-type-definitions/
 .luarc.json
-Nampower_Wiki.txt
+.gitignore
+CLAUDE.md
+AddonsForCompatibility/
+Nampower_Wiki/
 SuperWoW_Wiki.txt
 UnitXP_SP3_Wiki.txt
+.claude/
+TWoW_Wiki.txt

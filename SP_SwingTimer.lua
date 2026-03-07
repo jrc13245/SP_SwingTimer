@@ -1,5 +1,5 @@
 
-local version = "6.3.0"
+local version = "7.0.0"
 
 local defaults = {
 	x = 0,
@@ -128,13 +128,13 @@ local S = {
 local LAG_SAMPLE_COUNT = 5
 
 -- Feature detection - deferred to avoid crashes during load
-local has_nampower = false
 local has_unitxp = false
 
 local function DetectFeatures()
-	-- Safely detect Nampower
-	if GetCurrentCastingInfo then
-		has_nampower = true
+	-- Nampower is required - enable needed CVars
+	if GetNampowerVersion then
+		SetCVar("NP_EnableAutoAttackEvents", "1")
+		SetCVar("NP_EnableSpellGoEvents", "1")
 	end
 	-- Safely detect UnitXP
 	if UnitXP then
@@ -185,9 +185,26 @@ loc["frFR"] = {
 	}
 }
 local L = loc[GetLocale()];
-if (L == nil) then 
-	L = loc['enUS']; 
+if (L == nil) then
+	L = loc['enUS'];
 end
+--------------------------------------------------------------------------------
+-- Spell ID lookup tables for swing detection
+local hsSpellIDs = {[78]=true, [284]=true, [285]=true, [1608]=true, [11564]=true, [11565]=true, [11566]=true, [11567]=true, [25286]=true}
+local cleaveSpellIDs = {[845]=true, [7369]=true, [11608]=true, [11609]=true, [20569]=true}
+local rsSpellIDs = {[2973]=true, [14260]=true, [14261]=true, [14262]=true, [14263]=true, [14264]=true, [14265]=true, [14266]=true, [27014]=true}
+local maulSpellIDs = {[6807]=true, [6808]=true, [6809]=true, [8972]=true, [9745]=true, [9880]=true, [9881]=true, [26996]=true}
+-- combatSpellIDs = union of HS, Cleave, RS, Maul (spells that replace MH auto-attack)
+local combatSpellIDs = {}
+for id in hsSpellIDs do combatSpellIDs[id] = true end
+for id in cleaveSpellIDs do combatSpellIDs[id] = true end
+for id in rsSpellIDs do combatSpellIDs[id] = true end
+for id in maulSpellIDs do combatSpellIDs[id] = true end
+local rangedSpellIDs = {[5019]=true, [75]=true}
+local wfSpellIDs = {[51368]=1, [16361]=2}
+-- AUTO_ATTACK_SELF hitInfo flag constants
+local HITINFO_LEFTSWING = 4
+local HITINFO_NOACTION = 65536
 --------------------------------------------------------------------------------
 StaticPopupDialogs["SP_ST_Install"] = {
 	text = TEXT("Thanks for installing SP_SwingTimer " ..version .. "! Use the chat command /st to change the settings."),
@@ -288,97 +305,16 @@ end
 
 --------------------------------------------------------------------------------
 
-local HeroicTrackedActionSlots = {}
-local CleaveTrackedActionSlots = {}
-
-local function UpdateHeroicStrike()
-	local _, class = UnitClass("player")
-	if class ~= "WARRIOR" or not SP_ST_GS["show_hs"] then
-		return
-	end
-	HeroicTrackedActionSlots = {}
-	local SPActionSlot = 0;
-	for SPActionSlot = 1, 120 do
-		local SPActionText = GetActionText(SPActionSlot);
-		local SPActionTexture = GetActionTexture(SPActionSlot);
-		
-		if SPActionTexture then
-			if (SPActionTexture == "Interface\\Icons\\Ability_Rogue_Ambush") then
-				tinsert(HeroicTrackedActionSlots, SPActionSlot);
-			elseif SPActionText then
-				SPActionText = string.lower(SPActionText)
-				if (SPActionText == "heroic strike" or SPActionText == "heroicstrike" or SPActionText == "hs") then
-					tinsert(HeroicTrackedActionSlots, SPActionSlot);
-				end
-			end
-		end
-	end
-
-end
-
-----------------------------------------------------------------------------------
-
-local function UpdateCleave()
-	local _, class = UnitClass("player")
-	if class ~= "WARRIOR" or not SP_ST_GS["show_hs"] then
-		return
-	end
-	CleaveTrackedActionSlots = {}
-	local SPActionSlot = 0;
-	for SPActionSlot = 1, 120 do
-		local SPActionText = GetActionText(SPActionSlot);
-		local SPActionTexture = GetActionTexture(SPActionSlot);
-		
-		if SPActionTexture then
-			if SPActionTexture == "Interface\\Icons\\Ability_Warrior_Cleave" then
-				tinsert(CleaveTrackedActionSlots, SPActionSlot);
-			elseif SPActionText then
-				SPActionText = string.lower(SPActionText)
-				if (SPActionText == "cleave") then
-					tinsert(CleaveTrackedActionSlots, SPActionSlot);				
-				end
-			end
-		end
-	end
-
-end
-
---------------------------------------------------------------------------------
-
 local function HeroicStrikeQueued()
-	-- Use Nampower's on-swing tracking if available
-	if has_nampower and S.queued_onswing_spell then
-		local name = SpellInfo(S.queued_onswing_spell)
-		return name == "Heroic Strike" or name == L['combatSpells']['HS']
-	end
-	-- Fallback to action bar scanning
-	if not HeroicTrackedActionSlots or getn(HeroicTrackedActionSlots) == 0 then
-		return nil
-	end
-	for _, actionslotID in ipairs (HeroicTrackedActionSlots) do
-		if IsCurrentAction(actionslotID) then
-			return true
-		end
+	if S.queued_onswing_spell then
+		return hsSpellIDs[S.queued_onswing_spell] ~= nil
 	end
 	return false
 end
 
-------------------------------------------------------------------------------------
-
 local function CleaveQueued()
-	-- Use Nampower's on-swing tracking if available
-	if has_nampower and S.queued_onswing_spell then
-		local name = SpellInfo(S.queued_onswing_spell)
-		return name == "Cleave" or name == L['combatSpells']['Cleave']
-	end
-	-- Fallback to action bar scanning
-	if not CleaveTrackedActionSlots or getn(CleaveTrackedActionSlots) == 0 then
-		return nil
-	end
-	for _, actionslotID in ipairs (CleaveTrackedActionSlots) do
-		if IsCurrentAction(actionslotID) then
-			return true
-		end
+	if S.queued_onswing_spell then
+		return cleaveSpellIDs[S.queued_onswing_spell] ~= nil
 	end
 	return false
 end
@@ -397,17 +333,19 @@ end
 
 --------------------------------------------------------------------------------
 
--- flurry check
-local function CheckFlurry()
-  local c = 0
-  while GetPlayerBuff(c,"HELPFUL") ~= -1 do
-    local id = GetPlayerBuffID(c)
-		if SpellInfo(id) == "Flurry" then
-			return GetPlayerBuffApplications(c)
+-- Init-time Flurry check using Nampower aura API
+local function CheckFlurryInit()
+	S.flurry_count = -1
+	for slot = 0, 31 do
+		local spellId = GetPlayerAuraDuration(slot)
+		if spellId and spellId > 0 then
+			local name = GetSpellNameAndRankForId(spellId)
+			if name == "Flurry" then
+				S.flurry_count = 3  -- assume full stacks on init
+				return
+			end
 		end
-		c = c + 1
-  end
-	return -1
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -894,12 +832,14 @@ function SP_ST_OnLoad()
 	this:RegisterEvent("CHAT_MSG_COMBAT_HOSTILEPLAYER_MISSES")
 	this:RegisterEvent("CHAT_MSG_SPELL_HOSTILEPLAYER_DAMAGE")
 	this:RegisterEvent("CHARACTER_POINTS_CHANGED")
-	this:RegisterEvent("UNIT_CASTEVENT")
-	-- this:RegisterEvent("UNIT_AURA")
-	-- this:RegisterEvent("PLAYER_AURAS_CHANGED")
 	this:RegisterEvent("PLAYER_ENTERING_WORLD")
-	this:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
-	-- SPELL_QUEUE_EVENT registered in ADDON_LOADED after feature detection
+	-- Nampower events (required)
+	this:RegisterEvent("AUTO_ATTACK_SELF")
+	this:RegisterEvent("SPELL_GO_SELF")
+	this:RegisterEvent("SPELL_QUEUE_EVENT")
+	this:RegisterEvent("SPELL_CAST_EVENT")
+	this:RegisterEvent("BUFF_ADDED_SELF")
+	this:RegisterEvent("BUFF_REMOVED_SELF")
 	-- Register logout events to prevent UnitXP crash during logout
 	this:RegisterEvent("PLAYER_LOGOUT")
 	this:RegisterEvent("PLAYER_LEAVING_WORLD")
@@ -912,14 +852,7 @@ function SP_ST_OnEvent()
 		return
 	end
 	if (event == "ADDON_LOADED" and arg1 == "SP_SwingTimer") then
-		-- Detect SuperWoW extensions safely
 		DetectFeatures()
-
-		-- Register Nampower events if available
-		if has_nampower then
-			this:RegisterEvent("SPELL_QUEUE_EVENT")
-			this:RegisterEvent("SPELL_CAST_EVENT")
-		end
 
 		if (SP_ST_GS == nil) then
 			StaticPopup_Show("SP_ST_Install")
@@ -948,10 +881,8 @@ function SP_ST_OnEvent()
 		S.is_hunter = S.player_class == "HUNTER"
 		if UnitAffectingCombat('player') then S.combat = true else S.combat = false end
 		GetFlurry(S.player_class)
-		CheckFlurry()
+		CheckFlurryInit()
 		UpdateDisplay()
-		UpdateHeroicStrike()
-		UpdateCleave()
 	elseif (event == "PLAYER_REGEN_ENABLED") then
 		_,S.player_guid = UnitExists("player")
 		_,S.player_class = UnitClass("player")
@@ -959,151 +890,160 @@ function SP_ST_OnEvent()
 		if UnitAffectingCombat('player') then S.combat = true else S.combat = false end
 
 		GetFlurry(S.player_class)
-		CheckFlurry()
+		CheckFlurryInit()
 		UpdateDisplay()
 	elseif (event == "PLAYER_REGEN_DISABLED") then
 		S.combat = true
 		S.wf_swings = 0
-		CheckFlurry()
+		CheckFlurryInit()
 	elseif (event == "CHARACTER_POINTS_CHANGED") then
 		GetFlurry(S.player_class)
-	elseif (event == "ACTIONBAR_SLOT_CHANGED") then
-		UpdateHeroicStrike()
-		UpdateCleave()
 	elseif (event == "SPELL_QUEUE_EVENT") then
 		-- Nampower on-swing spell queue tracking (arg1 = eventCode, arg2 = spellId)
 		OnSpellQueueEvent(arg1, arg2)
 	elseif (event == "SPELL_CAST_EVENT") then
-		-- Nampower latency measurement: arg1=success, arg2=spellId
-		-- Measure time between cast start and server confirmation
-		if S.pending_cast_spell and arg2 == S.pending_cast_spell and S.pending_cast_time then
+		-- Record cast start time for latency measurement
+		if arg1 == 1 then  -- success
+			S.pending_cast_time = GetTime()
+			S.pending_cast_spell = arg2
+		end
+	elseif (event == "AUTO_ATTACK_SELF") then
+		-- arg4 = hitInfo bitfield
+		local hitInfo = arg4
+
+		-- Skip if NOACTION flag set (server didn't advance swing clock)
+		if math.mod(math.floor(hitInfo / HITINFO_NOACTION), 2) ~= 0 then
+			return
+		end
+
+		-- HITINFO_LEFTSWING means off-hand attack
+		local off = math.mod(math.floor(hitInfo / HITINFO_LEFTSWING), 2) ~= 0
+
+		if not off then
+			-- Main hand
+			if S.timer_zero_time and SP_ST_GS["autolag"] then
+				local lag_sample = GetTime() - S.timer_zero_time
+				if lag_sample > 0 and lag_sample < 0.5 then
+					AddLagSample(lag_sample * 2)
+				end
+			end
+			S.timer_zero_time = nil
+
+			ResetTimer(false)
+
+			if S.ele_flurry_fresh then
+				st_timer = st_timer / 1.3
+				st_timerMax = st_timerMax / 1.3
+				S.ele_flurry_fresh = false
+			end
+			if not S.ele_flurry_fresh and S.ele_flurry_fresh ~= nil then
+				st_timer = st_timer * 1.3
+				st_timerMax = st_timerMax * 1.3
+				S.ele_flurry_fresh = nil
+			end
+
+			if S.flurry_fresh then
+				st_timer = st_timer / S.flurry_mult
+				st_timerMax = st_timerMax / S.flurry_mult
+				S.flurry_fresh = false
+			end
+			if S.flurry_count == 0 then
+				st_timer = st_timer * S.flurry_mult
+				st_timerMax = st_timerMax * S.flurry_mult
+			end
+		else
+			-- Off hand
+			if S.timer_zero_timeOH and SP_ST_GS["autolag"] then
+				local lag_sample = GetTime() - S.timer_zero_timeOH
+				if lag_sample > 0 and lag_sample < 0.5 then
+					AddLagSample(lag_sample * 2)
+				end
+			end
+			S.timer_zero_timeOH = nil
+
+			ResetTimer(true)
+
+			if S.flurry_fresh then
+				st_timerOff = st_timerOff / S.flurry_mult
+				st_timerOffMax = st_timerOffMax / S.flurry_mult
+				S.flurry_fresh = false
+			end
+			if S.flurry_count == 0 then
+				st_timerOff = st_timerOff * S.flurry_mult
+				st_timerOffMax = st_timerOffMax * S.flurry_mult
+			end
+		end
+
+		if S.wf_swings > 0 then
+			S.wf_swings = S.wf_swings - 1
+		else
+			S.flurry_count = S.flurry_count - 1
+		end
+	elseif (event == "SPELL_GO_SELF") then
+		local spellId = arg2
+
+		-- Latency completion: SPELL_GO confirms server-side spell processing
+		if S.pending_cast_spell and spellId == S.pending_cast_spell and S.pending_cast_time then
 			local round_trip = GetTime() - S.pending_cast_time
-			-- Only use reasonable samples (10-500ms)
 			if round_trip > 0.01 and round_trip < 0.5 and SP_ST_GS["autolag"] then
 				AddLagSample(round_trip)
 			end
 			S.pending_cast_spell = nil
 			S.pending_cast_time = nil
 		end
-	elseif (event == "UNIT_CASTEVENT" and arg1 == S.player_guid) then
-		local spell = SpellInfo(arg4)
 
-		-- Track spell cast start for Nampower latency measurement
-		if arg3 == "START" and has_nampower then
-			S.pending_cast_time = GetTime()
-			S.pending_cast_spell = arg4
-		end
-		-- print(spell .. " "..arg4)
-
-		-- wf proc happens first, then the normal hit, then the 1-2 wf hits
-		-- if S.flurry_count > 0 then
-		if (arg4 == 51368 or arg4 == 16361) then
-			S.wf_swings = S.wf_swings + ((arg4 == 51368) and 1 or 2)
+		-- Check for Windfury procs
+		if wfSpellIDs[spellId] then
+			S.wf_swings = S.wf_swings + wfSpellIDs[spellId]
 			return
 		end
 
-		if spell == "Flurry" then
-			-- track a completely fresh flurry for timing
-			S.flurry_fresh = S.flurry_count < 1
-			S.flurry_count = 3
+		-- Check for ranged spells (wand/auto shot)
+		if rangedSpellIDs[spellId] then
+			ResetTimer(nil, true)
 			return
 		end
 
-		if spell == "Elemental Flurry" then
+		-- Check for combat spells that replace MH auto-attack
+		if combatSpellIDs[spellId] then
+			ResetTimer(false)
+			if S.flurry_fresh then
+				st_timer = st_timer / S.flurry_mult
+				st_timerMax = st_timerMax / S.flurry_mult
+				S.flurry_fresh = false
+			end
+			if S.flurry_count == 0 then
+				st_timer = st_timer * S.flurry_mult
+				st_timerMax = st_timerMax * S.flurry_mult
+			end
+			S.flurry_count = S.flurry_count - 1
+		end
+	elseif (event == "BUFF_ADDED_SELF") then
+		local spellId = arg3
+		local stackCount = arg4
+		local ok, name = pcall(GetSpellNameAndRankForId, spellId)
+		if not ok then return end
+		if name == "Flurry" then
+			S.flurry_fresh = (S.flurry_count < 1)
+			S.flurry_count = stackCount
+		elseif name == "Elemental Flurry" then
 			S.ele_flurry_fresh = true
 		end
-
-		-- Slam: timer keeps running during cast, but auto-attack is held until cast finishes
-		-- We don't need to handle Slam specially - the held auto-attack fires naturally
-		-- after Slam ends and will be detected by the normal auto-attack handler below
-
-		if arg4 == 6603 then -- autoattack
-			if arg3 == "MAINHAND" then
-				-- Measure latency: time between timer hitting 0 and receiving swing event
-				if S.timer_zero_time and SP_ST_GS["autolag"] then
-					local lag_sample = GetTime() - S.timer_zero_time
-					-- Only use reasonable samples (< 500ms)
-					if lag_sample > 0 and lag_sample < 0.5 then
-						AddLagSample(lag_sample * 2) -- multiply by 2 since this is one-way
-					end
-				end
-				S.timer_zero_time = nil
-
-				ResetTimer(false)
-
-				if S.ele_flurry_fresh then
-					st_timer = st_timer / 1.3
-					st_timerMax = st_timerMax / 1.3
-					S.ele_flurry_fresh = false
-				end
-				if not S.ele_flurry_fresh and S.ele_flurry_fresh ~= nil then
-					st_timer = st_timer * 1.3
-					st_timerMax = st_timerMax * 1.3
-					S.ele_flurry_fresh = nil
-				end
-
-				if S.flurry_fresh then -- fresh flurry, decrease the swing cooldown of the next swing
-					st_timer = st_timer / S.flurry_mult
-					st_timerMax = st_timerMax / S.flurry_mult
-					S.flurry_fresh = false
-				end
-				if S.flurry_count == 0 then -- used up last flurry
-					st_timer = st_timer * S.flurry_mult
-					st_timerMax = st_timerMax * S.flurry_mult
-				end
-			elseif arg3 == "OFFHAND" then
-				-- Measure latency for offhand
-				if S.timer_zero_timeOH and SP_ST_GS["autolag"] then
-					local lag_sample = GetTime() - S.timer_zero_timeOH
-					if lag_sample > 0 and lag_sample < 0.5 then
-						AddLagSample(lag_sample * 2)
-					end
-				end
-				S.timer_zero_timeOH = nil
-
-				ResetTimer(true)
-
-				if S.flurry_fresh then -- fresh flurry, decrease the swing cooldown of the next swing
-					st_timerOff = st_timerOff / S.flurry_mult
-					st_timerOffMax = st_timerOffMax / S.flurry_mult
-					S.flurry_fresh = false
-				end
-				if S.flurry_count == 0 then -- used up last flurry
-					st_timerOff = st_timerOff * S.flurry_mult
-					st_timerOffMax = st_timerOffMax * S.flurry_mult
-				end
+	elseif (event == "BUFF_REMOVED_SELF") then
+		local spellId = arg3
+		local stackCount = arg4
+		local state = arg7
+		local ok, name = pcall(GetSpellNameAndRankForId, spellId)
+		if not ok then return end
+		if name == "Flurry" then
+			if state == 1 then  -- removed entirely
+				S.flurry_count = 0
+			elseif state == 2 then  -- stack decreased
+				S.flurry_count = stackCount
 			end
-			-- print(GetTime() .. " normal swing "..S.flurry_count)
-			-- print(GetTime() .. " wf_swing "..S.wf_swings)
-			if S.wf_swings > 0 then
-				S.wf_swings = S.wf_swings - 1
-			else
-				S.flurry_count = S.flurry_count - 1 -- normal swing occured, reduce flurry counter
-			end
-			return
-		elseif arg3 == "CAST" and (arg4 == 5019 or arg4 == 75) then
-			-- wand shoot (5019) or hunter Auto Shot (75)
-			ResetTimer(nil,true)
-			return
-		end
-
-		-- check for attacks that take the place of autoattack
-		for _,v in L['combatSpells'] do
-			if spell == v and arg3 == "CAST" then
-				-- print(spellname .. " " .. S.flurry_count)
-				-- print(format("sp %.3f",GetWeaponSpeed(false)) .. " " .. S.flurry_count)
-				ResetTimer(false)
-				if S.flurry_fresh then
-					st_timer = st_timer / S.flurry_mult
-					st_timerMax = st_timerMax / S.flurry_mult
-					S.flurry_fresh = false
-				end
-				if S.flurry_count == 0 then -- used up last flurry
-					st_timer = st_timer * S.flurry_mult
-					st_timerMax = st_timerMax * S.flurry_mult
-				end
-				S.flurry_count = S.flurry_count - 1 -- swing occured, reduce flurry counter
-				return
+		elseif name == "Elemental Flurry" then
+			if state == 1 then
+				S.ele_flurry_fresh = nil
 			end
 		end
 
@@ -1255,7 +1195,7 @@ local function ChatHandler(msg)
 		else
 			local current = SP_ST_GS["lag"] or 0
 			local auto = math.floor(S.estimated_lag * 1000 + 0.5)
-			local source = has_nampower and "Nampower" or "swing timing"
+			local source = "Nampower"
 			print("Latency: manual=" .. current .. "ms, auto=" .. auto .. "ms (" .. source .. "), using=" .. math.floor(GetLagOffset() * 1000 + 0.5) .. "ms")
 		end
 	elseif cmd == "autolag" then
