@@ -109,7 +109,6 @@ local S = {
 	player_class = nil,
 	is_hunter = false,
 	flurry_mult = 1,
-	range_fader = 0,
 	ele_flurry_fresh = nil,
 	flurry_fresh = nil,
 	flurry_count = -1,
@@ -200,7 +199,7 @@ for id in hsSpellIDs do combatSpellIDs[id] = true end
 for id in cleaveSpellIDs do combatSpellIDs[id] = true end
 for id in rsSpellIDs do combatSpellIDs[id] = true end
 for id in maulSpellIDs do combatSpellIDs[id] = true end
-local rangedSpellIDs = {[5019]=true, [75]=true}
+local rangedSpellIDs = {[5019]=true, [75]=true, [2480]=true, [7918]=true, [7919]=true, [2764]=true}
 local wfSpellIDs = {[51368]=1, [16361]=2}
 -- AUTO_ATTACK_SELF hitInfo flag constants
 local HITINFO_LEFTSWING = 4
@@ -571,7 +570,6 @@ local function ResetTimer(off,ranged)
 		st_timerOff = GetWeaponSpeed(off) - lag_offset
 		if st_timerOff < 0 then st_timerOff = 0 end
 	else
-		S.range_fader = GetTime()
 		st_timerRangeMax = GetWeaponSpeed(false,true)
 		st_timerRange = GetWeaponSpeed(false,true) - lag_offset
 		if st_timerRange < 0 then st_timerRange = 0 end
@@ -620,7 +618,7 @@ local function UpdateDisplay()
 	local rangeInRange
 	if not UnitExists("target") then
 		rangeInRange = true -- no target, don't show red
-	elseif S.is_hunter and has_unitxp then
+	elseif has_unitxp then
 		local dist = UnitXP("distanceBetween", "player", "target")
 		rangeInRange = dist and dist <= 35
 	else
@@ -638,10 +636,6 @@ local function UpdateDisplay()
 			local bga = SP_ST_GS["bga"] or 0.8
 			SP_ST_FrameRange:SetBackdropColor(1,0,0,bga);
 		end
-	end
-	-- hunters keep ranged bar visible during combat; other classes fade after 10s
-	if not S.is_hunter and GetTime() - 10 > S.range_fader then
-		SP_ST_FrameRange:Hide()
 	end
 
 	if (st_timer <= 0) then
