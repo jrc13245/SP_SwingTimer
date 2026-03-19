@@ -49,7 +49,7 @@
 						</Anchor>
 					</Anchors>
 				</Texture>
-				<FontString name="SP_ST_maintimer" justifyH="RIGHT" justifyV="MIDDLE">
+				<FontString name="SP_ST_maintimer" inherits="GameFontNormal" justifyH="RIGHT" justifyV="MIDDLE">
 				</FontString>
 			</Layer>
 		</Layers>
@@ -79,7 +79,7 @@
 						</Anchor>
 					</Anchors>
 				</Texture>
-				<FontString name="SP_ST_offtimer" justifyH="RIGHT" justifyV="MIDDLE">
+				<FontString name="SP_ST_offtimer" inherits="GameFontNormal" justifyH="RIGHT" justifyV="MIDDLE">
 				</FontString>
 			</Layer>
 		</Layers>
@@ -109,7 +109,7 @@
 						</Anchor>
 					</Anchors>
 				</Texture>
-				<FontString name="SP_ST_rangetimer" justifyH="RIGHT" justifyV="MIDDLE">
+				<FontString name="SP_ST_rangetimer" inherits="GameFontNormal" justifyH="RIGHT" justifyV="MIDDLE">
 				</FontString>
 			</Layer>
 		</Layers>
